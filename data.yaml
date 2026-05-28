@@ -1,0 +1,7 @@
+#path: 
+path: D:/cctv_ai_security/splited_dataset_4
+train: images/train
+val: images/valid
+
+nc: 11
+names: ['normal', 'suspected', 'sitting', 'standing', 'leaning', 'spool', 'vacuume','grove','unzip','undress','badge']
