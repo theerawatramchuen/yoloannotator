@@ -3,6 +3,7 @@
 A lightweight desktop tool for creating and editing bounding box annotations in **YOLO format** (`.txt` label files). Built with Python and Tkinter — no GPU, no heavy dependencies.
 
 ---
+<img width="1920" height="1100" alt="image" src="https://github.com/user-attachments/assets/5179a719-42e9-452d-8ce5-39bb52aaa121" />
 
 ## Features
 
