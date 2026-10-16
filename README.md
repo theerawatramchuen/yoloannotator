@@ -3,7 +3,6 @@
 A lightweight desktop tool for creating and editing bounding box annotations in **YOLO format** (`.txt` label files). Built with Python and Tkinter — no GPU, no heavy dependencies.
 
 ---
-<img width="1920" height="1100" alt="image" src="https://github.com/user-attachments/assets/5179a719-42e9-452d-8ce5-39bb52aaa121" />
 
 ## Features
 
@@ -11,7 +10,7 @@ A lightweight desktop tool for creating and editing bounding box annotations in 
 |---|---|
 | **Draw** | Click-drag to create new boxes on the canvas |
 | **Edit** | Move boxes by dragging, resize by dragging corner handles |
-| **Copy / Paste** | Copy any box and paste it with a cascading offset |
+| **Copy / Paste** | Copy any box; paste with cascading +20 px offset (`V`) or at exact same position (`B`) |
 | **Delete** | Remove selected box with `Del` or toolbar button |
 | **Change Class** | Select a box, pick a class in the right panel, click Change Class (or press `0`–`9`) |
 | **Navigation** | Prev / Next image with unsaved-changes guard |
@@ -19,7 +18,8 @@ A lightweight desktop tool for creating and editing bounding box annotations in 
 | **Jump to Unannotated** | Button always finds the next unlabelled image |
 | **Dataset Summary** | Total images, annotated count, unannotated count, per-class box counts |
 | **Filmstrip** | Scrollable thumbnail strip with green/red annotation indicator dots (toggle on/off) |
-| **Zoom** | Fit / 50% / 75% / 100% / 150% / 200% |
+| **Zoom** | Fit / 50% / 75% / 100% / 150% / 200%; scroll-wheel zooms towards cursor |
+| **Pan** | Middle-mouse drag or `Space`+left-drag to pan when zoomed in |
 | **Live Coords** | Mouse pixel coordinates shown in the status bar |
 | **Unsaved-change Guard** | Prompts to save before navigating away from a dirty image |
 
@@ -127,6 +127,7 @@ Only the `names` field is read by the annotator.
 | `S` | Save annotations |
 | `C` | Copy selected box |
 | `V` | Paste copied box (cascades +20 px each paste) |
+| `B` | Paste copied box at **exact same position** (no offset; clipboard stays fixed) |
 | `F` | Toggle filmstrip on / off |
 | `Del` / `Backspace` | Delete selected box |
 | `Esc` | Deselect current box |
@@ -138,7 +139,9 @@ Only the `names` field is read by the annotator.
 
 | Action | How |
 |---|---|
-| **Draw new box** | Click and drag on an empty area of the canvas |
+| **Draw new box** | Click and drag on an empty area of the canvas (not while holding Space) |
+| **Pan (zoom >Fit)** | Middle-mouse drag, or hold `Space` then left-drag |
+| **Zoom to cursor** | Scroll wheel — zooms in/out centred on the mouse pointer |
 | **Select box** | Click inside any existing box |
 | **Move box** | Click inside a selected box and drag |
 | **Resize box** | Drag one of the four corner handles (appear when box is selected) |
