@@ -100,11 +100,19 @@ class AnnotatorApp(tk.Tk):
         self._drag_offset = None
         self._resize_handle = None  # ("tl","tr","bl","br","l","r","t","b")
 
+        # Pan state
+        self._pan_start = None       # (canvas_x, canvas_y) where pan began
+        self._pan_offset_start = None  # (_offset_x, _offset_y) at pan start
+        self._panning = False
+        self._space_held = False
+
         # Display
         self._photo = None
         self._scale = 1.0
         self._offset_x = 0
         self._offset_y = 0
+        self._pan_x = 0              # extra pan offset (added on top of centering)
+        self._pan_y = 0
         self._orig_w = 1
         self._orig_h = 1
 
@@ -144,7 +152,9 @@ class AnnotatorApp(tk.Tk):
                   **btn_cfg).pack(side=tk.LEFT, padx=4)
         tk.Button(toolbar, text="📋 Copy Box (C)", command=self._copy_box,
                   **btn_cfg).pack(side=tk.LEFT, padx=4)
-        tk.Button(toolbar, text="📌 Paste Box (V)", command=self._paste_box,
+        tk.Button(toolbar, text="📌 Paste (V) +offset", command=self._paste_box,
+                  **btn_cfg).pack(side=tk.LEFT, padx=4)
+        tk.Button(toolbar, text="📌 Paste (B) exact", command=self._paste_box_exact,
                   **btn_cfg).pack(side=tk.LEFT, padx=4)
         tk.Button(toolbar, text="🔍 Jump to Unannotated",
                   command=self._jump_to_unannotated, **btn_cfg).pack(side=tk.LEFT, padx=4)
@@ -162,7 +172,7 @@ class AnnotatorApp(tk.Tk):
                                  values=["Fit", "50%", "75%", "100%", "150%", "200%"],
                                  width=6, state="readonly")
         zoom_menu.pack(side=tk.LEFT, padx=4)
-        zoom_menu.bind("<<ComboboxSelected>>", lambda e: self._redraw())
+        zoom_menu.bind("<<ComboboxSelected>>", self._on_zoom_changed)
 
         self._status_var = tk.StringVar(value="Ready")
         tk.Label(toolbar, textvariable=self._status_var, bg="#2C2C2E", fg="#AEAEB2",
@@ -256,12 +266,27 @@ class AnnotatorApp(tk.Tk):
         self._film_canvas.bind("<Button-1>", self._film_click)
         self._film_thumbs = []  # [(PhotoImage, x_center)]
 
-        # Canvas bindings
+        # Canvas bindings — drawing / selecting
         self.canvas.bind("<ButtonPress-1>", self._on_canvas_press)
         self.canvas.bind("<B1-Motion>", self._on_canvas_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_canvas_release)
         self.canvas.bind("<Motion>", self._on_canvas_motion)
         self.canvas.bind("<Configure>", lambda e: self._redraw())
+
+        # Pan — middle mouse button
+        self.canvas.bind("<ButtonPress-2>", self._on_pan_start)
+        self.canvas.bind("<B2-Motion>", self._on_pan_drag)
+        self.canvas.bind("<ButtonRelease-2>", self._on_pan_end)
+        # Pan — Space + left drag
+        self.bind("<KeyPress-space>", self._on_space_press)
+        self.bind("<KeyRelease-space>", self._on_space_release)
+        self.canvas.bind("<ButtonPress-1>", self._on_canvas_press_route, add="+")
+        self.canvas.bind("<B1-Motion>", self._on_canvas_drag_route, add="+")
+        self.canvas.bind("<ButtonRelease-1>", self._on_canvas_release_route, add="+")
+        # Mouse-wheel zoom
+        self.canvas.bind("<MouseWheel>", self._on_mousewheel)        # Windows/macOS
+        self.canvas.bind("<Button-4>", self._on_mousewheel)          # Linux scroll up
+        self.canvas.bind("<Button-5>", self._on_mousewheel)          # Linux scroll down
 
     def _bind_keys(self):
         self.bind("<s>", lambda e: self._save())
@@ -272,6 +297,7 @@ class AnnotatorApp(tk.Tk):
         self.bind("<Escape>", lambda e: self._deselect())
         self.bind("<c>", lambda e: self._copy_box())
         self.bind("<v>", lambda e: self._paste_box())
+        self.bind("<b>", lambda e: self._paste_box_exact())
         self.bind("<f>", lambda e: self._toggle_filmstrip())
         # Number keys to quickly switch class
         for i in range(min(10, len(self.classes))):
@@ -300,6 +326,8 @@ class AnnotatorApp(tk.Tk):
         self.boxes = load_annotations(txt_for_image(img_path), self._orig_w, self._orig_h)
         self.selected_box = None
         self.dirty = False
+        self._pan_x = 0
+        self._pan_y = 0
         self._update_box_listbox()
         self._redraw()
         self._update_status()
@@ -416,6 +444,139 @@ class AnnotatorApp(tk.Tk):
         self._update_box_listbox()
         self._redraw()
 
+    def _paste_box_exact(self):
+        """Paste clipboard box at exact same position (zero offset). Key: B."""
+        if self._clipboard_box is None:
+            return
+        cls, x1, y1, x2, y2 = self._clipboard_box
+        new_box = [cls, x1, y1, x2, y2]
+        self.boxes.append(new_box)
+        self.selected_box = len(self.boxes) - 1
+        # Clipboard stays unchanged — repeated B always pastes at the same spot
+        self.dirty = True
+        self._update_box_listbox()
+        self._redraw()
+        label = self.classes[cls] if cls < len(self.classes) else str(cls)
+        self._status_var.set(f"Pasted exact: {label}")
+
+    # ── Zoom ────────────────────────────────────────────────────────────────────
+
+    def _on_zoom_changed(self, event=None):
+        """Called when zoom combobox changes; resets pan for Fit, keeps it otherwise."""
+        if self._zoom_var.get() == "Fit":
+            self._pan_x = 0
+            self._pan_y = 0
+        self._redraw()
+
+    def _on_mousewheel(self, event):
+        """Zoom in/out with scroll wheel, centred on the cursor."""
+        zoom_levels = ["Fit", "50%", "75%", "100%", "150%", "200%"]
+        cur = self._zoom_var.get()
+        # Determine scroll direction
+        if event.num == 4 or (hasattr(event, "delta") and event.delta > 0):
+            direction = 1   # zoom in
+        else:
+            direction = -1  # zoom out
+
+        if cur == "Fit":
+            cur_idx = 0
+        else:
+            try:
+                cur_idx = zoom_levels.index(cur)
+            except ValueError:
+                cur_idx = 0
+
+        new_idx = max(0, min(len(zoom_levels) - 1, cur_idx + direction))
+        new_zoom = zoom_levels[new_idx]
+
+        if new_zoom == cur:
+            return
+
+        # Zoom towards mouse cursor: compute image-space point under cursor,
+        # then adjust pan so that point stays fixed after scale change.
+        if new_zoom != "Fit" and cur != "Fit":
+            mx, my = event.x, event.y
+            # image coords under cursor before zoom
+            ix = (mx - self._offset_x) / self._scale
+            iy = (my - self._offset_y) / self._scale
+            # new scale
+            new_scale = int(new_zoom.replace("%", "")) / 100.0
+            cw = self.canvas.winfo_width()
+            ch = self.canvas.winfo_height()
+            dw = int(self._orig_w * new_scale)
+            dh = int(self._orig_h * new_scale)
+            base_x = (cw - dw) // 2
+            base_y = (ch - dh) // 2
+            # pan so ix*new_scale + base_x + pan = mx
+            self._pan_x = int(mx - ix * new_scale - base_x)
+            self._pan_y = int(my - iy * new_scale - base_y)
+        else:
+            self._pan_x = 0
+            self._pan_y = 0
+
+        self._zoom_var.set(new_zoom)
+        self._redraw()
+
+    # ── Pan ─────────────────────────────────────────────────────────────────────
+
+    def _on_pan_start(self, event):
+        """Middle-mouse-button pan start."""
+        if self._zoom_var.get() == "Fit":
+            return
+        self._pan_start = (event.x, event.y)
+        self._pan_offset_start = (self._pan_x, self._pan_y)
+        self._panning = True
+        self.canvas.config(cursor="fleur")
+
+    def _on_pan_drag(self, event):
+        """Middle-mouse-button pan drag."""
+        if not self._panning or self._pan_start is None:
+            return
+        dx = event.x - self._pan_start[0]
+        dy = event.y - self._pan_start[1]
+        self._pan_x = self._pan_offset_start[0] + dx
+        self._pan_y = self._pan_offset_start[1] + dy
+        self._redraw()
+
+    def _on_pan_end(self, event):
+        """Middle-mouse-button pan end."""
+        self._panning = False
+        self._pan_start = None
+        self.canvas.config(cursor="crosshair")
+
+    def _on_space_press(self, event):
+        self._space_held = True
+        self.canvas.config(cursor="fleur")
+
+    def _on_space_release(self, event):
+        self._space_held = False
+        if not self._panning:
+            self.canvas.config(cursor="crosshair")
+
+    def _on_canvas_press_route(self, event):
+        """Space+left-click → start pan instead of draw."""
+        if self._space_held and self._zoom_var.get() != "Fit":
+            self._pan_start = (event.x, event.y)
+            self._pan_offset_start = (self._pan_x, self._pan_y)
+            self._panning = True
+
+    def _on_canvas_drag_route(self, event):
+        """Space+left-drag → pan."""
+        if self._panning and self._pan_start is not None:
+            dx = event.x - self._pan_start[0]
+            dy = event.y - self._pan_start[1]
+            self._pan_x = self._pan_offset_start[0] + dx
+            self._pan_y = self._pan_offset_start[1] + dy
+            self._redraw()
+
+    def _on_canvas_release_route(self, event):
+        """End Space+left pan."""
+        if self._panning:
+            self._panning = False
+            self._pan_start = None
+            if not self._space_held:
+                self.canvas.config(cursor="crosshair")
+
     def _toggle_filmstrip(self):
         """Show/hide the filmstrip panel; F key or toolbar button."""
         self._filmstrip_visible = not self._filmstrip_visible
@@ -455,13 +616,19 @@ class AnnotatorApp(tk.Tk):
             sx = cw / self._orig_w
             sy = ch / self._orig_h
             self._scale = min(sx, sy)
+            # Fit resets pan
+            self._pan_x = 0
+            self._pan_y = 0
         else:
             self._scale = int(zoom.replace("%", "")) / 100.0
 
         dw = int(self._orig_w * self._scale)
         dh = int(self._orig_h * self._scale)
-        self._offset_x = (cw - dw) // 2
-        self._offset_y = (ch - dh) // 2
+        # Base centering + user pan offset
+        base_x = (cw - dw) // 2
+        base_y = (ch - dh) // 2
+        self._offset_x = base_x + self._pan_x
+        self._offset_y = base_y + self._pan_y
 
         resized = self._img.resize((dw, dh), Image.LANCZOS)
         self._photo = ImageTk.PhotoImage(resized)
@@ -521,6 +688,9 @@ class AnnotatorApp(tk.Tk):
         return None
 
     def _on_canvas_press(self, event):
+        # If Space is held, pan mode is handled by the route binding — skip draw/select
+        if self._space_held:
+            return
         cx, cy = event.x, event.y
         # Check resize handle
         handle = self._hit_test_handle(cx, cy)
@@ -548,6 +718,8 @@ class AnnotatorApp(tk.Tk):
         self._redraw()
 
     def _on_canvas_drag(self, event):
+        if self._space_held:
+            return
         cx, cy = event.x, event.y
         # Resize
         if self._resize_handle is not None:
@@ -592,6 +764,8 @@ class AnnotatorApp(tk.Tk):
                 width=2, dash=(4, 3))
 
     def _on_canvas_release(self, event):
+        if self._space_held:
+            return
         cx, cy = event.x, event.y
         # Finish resize
         if self._resize_handle is not None:
@@ -628,6 +802,15 @@ class AnnotatorApp(tk.Tk):
 
     def _on_canvas_motion(self, event):
         cx, cy = event.x, event.y
+        # Pan-mode cursor
+        if self._space_held and self._zoom_var.get() != "Fit":
+            self.canvas.config(cursor="fleur")
+            if hasattr(self, "_orig_w"):
+                ix, iy = self._canvas_to_img(cx, cy)
+                ix = max(0, min(int(ix), self._orig_w))
+                iy = max(0, min(int(iy), self._orig_h))
+                self._status_var.set(f"Pan  x={ix}  y={iy}")
+            return
         # Change cursor based on context
         handle = self._hit_test_handle(cx, cy)
         if handle:
